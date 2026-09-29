@@ -1,0 +1,3 @@
+This save's signature doesn't match its contents - been in the file, have you?
+Refusing to load a tampered/corrupted save. (HOME_DIR/.larzvault/save.json)
+exit=1

@@ -1,0 +1,268 @@
+# LarzVault - a terminal idle/incremental economy game whose entire
+# economy runs through Larzscript's own money-native primitives.
+#
+# The pitch: every browser idle game (Cookie Clicker and its clones) is
+# trivially cheatable by opening devtools and setting a JS variable. In
+# LarzVault, no code path inside the game - not a bug, not a dev command,
+# not the save-loading path - can ever create currency out of thin air or
+# skip a spending guardrail, because `wallet`/`pay`/`require` are language
+# primitives, not application logic: you cannot write `player.balance =
+# 999999` any more than you can assign into a `wallet` except through
+# `pay`. Passive income isn't printed from nothing either - it's a real
+# `pay` from a large, fixed "World Reserve" wallet declared once at
+# genesis, so even idle income goes through the exact same enforcement as
+# every purchase.
+#
+# What this claim does NOT cover, stated plainly: a player can still
+# hand-edit the raw save file on disk, the same as any local single-player
+# game. The save is made tamper-evident (HMAC-SHA256 signed with a
+# per-install secret) so casual/accidental tampering is caught and
+# refused - not proof against a determined player who goes and reads
+# their own secret file. See "Honesty" in README.md.
+
+import "json" as json
+import "fs" as fs
+import "crypto" as crypto
+import "uuid" as uuid
+import "table" as table
+
+let SAVE_DIR = env("HOME") + "/.larzvault"
+let SAVE_PATH = SAVE_DIR + "/save.json"
+let SECRET_PATH = SAVE_DIR + "/secret"
+
+# Always-on base income ("manual labor"), $/s, so a fresh game can
+# bootstrap before the first upgrade.
+let BASE_RATE = 0.02
+
+# Idle progress is capped at this many real seconds so one long-neglected
+# save can't "catch up" unboundedly - a deliberate idle-game design
+# choice, not a technical limit (8 hours).
+let OFFLINE_CAP_SECONDS = 28800
+
+# One-time upgrades, escalating cost/payoff. Buying is a real pay() from
+# the player's wallet to a treasury sink wallet, guarded by a real
+# require().
+let UPGRADES = [
+  {"id": "solar", "name": "Solar Panel", "cost": 10.00, "rate": 0.05},
+  {"id": "wind", "name": "Wind Turbine", "cost": 50.00, "rate": 0.20},
+  {"id": "hydro", "name": "Hydro Plant", "cost": 200.00, "rate": 0.80},
+  {"id": "geo", "name": "Geothermal Rig", "cost": 750.00, "rate": 3.00},
+  {"id": "fusion", "name": "Fusion Core", "cost": 3000.00, "rate": 12.00},
+  {"id": "orbital", "name": "Orbital Array", "cost": 12000.00, "rate": 50.00},
+  {"id": "dyson", "name": "Dyson Shard", "cost": 50000.00, "rate": 220.00},
+  {"id": "singularity", "name": "Singularity Tap", "cost": 250000.00, "rate": 1000.00}
+]
+
+# The genesis reserve every unit of passive income is really pay()'d
+# from. Large but finite and declared once - nothing is minted from
+# nothing, it's paid out of a fixed supply, same as every other transfer.
+let WORLD_RESERVE_START_DOLLARS = 999999999.00
+
+let STARTING_BALANCE_DOLLARS = 5.00
+
+# ---- money <-> plain-number helpers (money is exact-cents, saves need
+# plain JSON numbers) ----
+
+fn _money_to_cents(m) {
+  let s = str(m)
+  return round(float(s[1:]) * 100)
+}
+
+fn _cents_to_money(c) {
+  return money(c / 100.0)
+}
+
+# ---- save file: tamper-evident via HMAC-SHA256 over the exact saved
+# JSON string (never a re-serialized copy, so there is no dict-ordering
+# risk in the comparison) ----
+
+fn _ensure_dir() {
+  if not fs.exists(SAVE_DIR) { run("mkdir -p " + SAVE_DIR) }
+}
+
+fn _get_secret() {
+  _ensure_dir()
+  if fs.exists(SECRET_PATH) { return fs.read(SECRET_PATH).strip() }
+  let secret = uuid.v4() + uuid.v4()
+  fs.write(SECRET_PATH, secret)
+  run("chmod 600 " + SECRET_PATH)
+  return secret
+}
+
+fn new_game() {
+  return {
+    "player_cents": round(STARTING_BALANCE_DOLLARS * 100),
+    "reserve_cents": round(WORLD_RESERVE_START_DOLLARS * 100),
+    "treasury_cents": 0,
+    "owned": [],
+    "last_seen": time(),
+    "created": time()
+  }
+}
+
+fn save_game(state) {
+  _ensure_dir()
+  let payload = json.stringify(state)
+  let secret = _get_secret()
+  let sig = crypto.hmac(secret, payload)
+  let envelope = {"payload": payload, "sig": sig}
+  fs.write(SAVE_PATH, json.stringify(envelope))
+}
+
+fn load_game() {
+  if not fs.exists(SAVE_PATH) { return new_game() }
+  let raw = fs.read(SAVE_PATH)
+  let envelope = json.parse(raw)
+  let secret = _get_secret()
+  let expected = crypto.hmac(secret, envelope["payload"])
+  if expected != envelope["sig"] {
+    print("This save's signature doesn't match its contents - been in the file, have you?")
+    print("Refusing to load a tampered/corrupted save. (" + SAVE_PATH + ")")
+    exit(1)
+  }
+  return json.parse(envelope["payload"])
+}
+
+# ---- game logic ----
+
+fn _current_rate(state) {
+  let rate = BASE_RATE
+  for u in UPGRADES {
+    if u["id"] in state["owned"] { rate = rate + u["rate"] }
+  }
+  return rate
+}
+
+# Applies real elapsed wall-clock time (capped) as passive income, via a
+# real pay() from the World Reserve wallet. Returns {state, earned_cents,
+# elapsed_seconds} - never mutates in place silently, the caller decides
+# whether to save.
+fn apply_idle_income(state) {
+  let now = time()
+  let elapsed = now - state["last_seen"]
+  if elapsed < 0 { elapsed = 0 }
+  if elapsed > OFFLINE_CAP_SECONDS { elapsed = OFFLINE_CAP_SECONDS }
+  let rate = _current_rate(state)
+  let earned_cents = floor(rate * elapsed * 100)
+  if earned_cents > 0 {
+    wallet reserve = _cents_to_money(state["reserve_cents"])
+    wallet player = _cents_to_money(state["player_cents"])
+    let amt = _cents_to_money(earned_cents)
+    pay amt from reserve to player
+    state["reserve_cents"] = _money_to_cents(reserve.balance)
+    state["player_cents"] = _money_to_cents(player.balance)
+  }
+  state["last_seen"] = now
+  return {"state": state, "earned_cents": earned_cents, "elapsed": elapsed}
+}
+
+fn find_upgrade(upgrade_id) {
+  for u in UPGRADES { if u["id"] == upgrade_id { return u } }
+  return nil
+}
+
+# Buying is a real require()-guarded pay(). Throws RequireError (via
+# require) if the player can't afford it, or a plain error dict if the
+# upgrade id is bad/already owned - the caller is expected to catch both.
+fn buy_upgrade(state, upgrade_id) {
+  let upgrade = find_upgrade(upgrade_id)
+  if upgrade == nil {
+    throw {"type": "LarzValueError", "message": "no such upgrade: " + upgrade_id}
+  }
+  if upgrade_id in state["owned"] {
+    throw {"type": "LarzValueError", "message": "already own " + upgrade["name"]}
+  }
+  wallet player = _cents_to_money(state["player_cents"])
+  wallet treasury = _cents_to_money(state["treasury_cents"])
+  let cost = money(upgrade["cost"])
+  # require's message must be a literal (the interpreter only accepts a
+  # string token there, not an expression) - the detailed, dynamic
+  # message is built by the CLI layer when it catches this RequireError.
+  require player.balance >= cost, "insufficient funds"
+  pay cost from player to treasury
+  state["player_cents"] = _money_to_cents(player.balance)
+  state["treasury_cents"] = _money_to_cents(treasury.balance)
+  state["owned"].push(upgrade_id)
+  return state
+}
+
+# ---- rendering ----
+
+fn render_status(state, earned_cents, elapsed) {
+  let out = ""
+  out = out + "LarzVault\n"
+  out = out + "---------\n"
+  if earned_cents > 0 {
+    out = out + "While away (" + str(elapsed) + "s): earned " + str(_cents_to_money(earned_cents)) + "\n\n"
+  }
+  out = out + "Balance:   " + str(_cents_to_money(state["player_cents"])) + "\n"
+  out = out + "Income:    $" + str(round(_current_rate(state) * 1000) / 1000.0) + "/s\n\n"
+  let rows = [["Upgrade", "Cost", "+Rate", "Owned"]]
+  for u in UPGRADES {
+    let owned = u["id"] in state["owned"] ? "yes" : ""
+    rows.push([u["name"], str(money(u["cost"])), "+$" + str(u["rate"]) + "/s", owned])
+  }
+  out = out + table.render(rows) + "\n"
+  out = out + "\nlarzscript larzvault.lz buy <id>   (id = one of: "
+  let ids = []
+  for u in UPGRADES { ids.push(u["id"]) }
+  out = out + join(ids, ", ") + ")\n"
+  return out
+}
+
+# ---- CLI ----
+
+fn main() {
+  let cmd = len(args) > 0 ? args[0] : "status"
+
+  if cmd == "reset" {
+    if fs.exists(SAVE_PATH) { remove(SAVE_PATH) }
+    print("Save reset. Run 'status' to start a new game.")
+    return
+  }
+
+  let state = load_game()
+  let result = apply_idle_income(state)
+  state = result["state"]
+
+  if cmd == "status" {
+    print(render_status(state, result["earned_cents"], result["elapsed"]))
+    save_game(state)
+    return
+  }
+
+  if cmd == "buy" {
+    if len(args) < 2 {
+      print("usage: larzvault.lz buy <upgrade-id>")
+      save_game(state)
+      exit(1)
+    }
+    let target = find_upgrade(args[1])
+    try {
+      state = buy_upgrade(state, args[1])
+      print("Bought " + target["name"] + ". New balance: " + str(_cents_to_money(state["player_cents"])) + ". Income: $" + str(round(_current_rate(state) * 1000) / 1000.0) + "/s")
+      save_game(state)
+    } catch e {
+      if e["type"] == "RequireError" and target != nil {
+        let have = _cents_to_money(state["player_cents"])
+        let cost = money(target["cost"])
+        print("Not enough for " + target["name"] + " - need " + str(cost) + ", have " + str(have) + ".")
+      } else {
+        # thrown messages get a " (line N)" suffix appended by the
+        # interpreter - strip it for a cleaner CLI message.
+        let msg = e["message"]
+        let marker = msg.find(" (line ")
+        print(marker >= 0 ? msg[0:marker] : msg)
+      }
+      save_game(state)
+      exit(1)
+    }
+    return
+  }
+
+  print("usage: larzvault.lz [status|buy <id>|reset]")
+  save_game(state)
+  exit(1)
+}
+
+main()

@@ -1,0 +1,17 @@
+LarzVault
+---------
+Balance:   $5.00
+Income:    $0.02/s
+
+| Upgrade         | Cost       | +Rate    | Owned |
+|-----------------|------------|----------|-------|
+| Solar Panel     | $10.00     | +$0.05/s |       |
+| Wind Turbine    | $50.00     | +$0.2/s  |       |
+| Hydro Plant     | $200.00    | +$0.8/s  |       |
+| Geothermal Rig  | $750.00    | +$3/s    |       |
+| Fusion Core     | $3000.00   | +$12/s   |       |
+| Orbital Array   | $12000.00  | +$50/s   |       |
+| Dyson Shard     | $50000.00  | +$220/s  |       |
+| Singularity Tap | $250000.00 | +$1000/s |       |
+
+larzscript larzvault.lz buy <id>   (id = one of: solar, wind, hydro, geo, fusion, orbital, dyson, singularity)

@@ -1,0 +1,39 @@
+# Test helper only: writes a validly-signed save with a chosen
+# player_cents balance, so tests can exercise a successful purchase
+# without waiting on or faking real wall-clock elapsed time. Duplicates
+# larzvault.lz's small save-signing logic on purpose - it's a test
+# fixture, not part of the shipped game.
+import "json" as json
+import "fs" as fs
+import "crypto" as crypto
+import "uuid" as uuid
+
+let SAVE_DIR = env("HOME") + "/.larzvault"
+let SAVE_PATH = SAVE_DIR + "/save.json"
+let SECRET_PATH = SAVE_DIR + "/secret"
+
+fn ensure_dir() { if not fs.exists(SAVE_DIR) { run("mkdir -p " + SAVE_DIR) } }
+
+fn get_secret() {
+  ensure_dir()
+  if fs.exists(SECRET_PATH) { return fs.read(SECRET_PATH).strip() }
+  let secret = uuid.v4() + uuid.v4()
+  fs.write(SECRET_PATH, secret)
+  return secret
+}
+
+let cents = int(args[0])
+let state = {
+  "player_cents": cents,
+  "reserve_cents": 99999999900,
+  "treasury_cents": 0,
+  "owned": [],
+  "last_seen": time(),
+  "created": time()
+}
+let payload = json.stringify(state)
+let secret = get_secret()
+let sig = crypto.hmac(secret, payload)
+ensure_dir()
+fs.write(SAVE_PATH, json.stringify({"payload": payload, "sig": sig}))
+print("seeded " + str(cents) + " cents")
