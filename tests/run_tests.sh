@@ -12,6 +12,13 @@ LARZVAULT="${LARZVAULT:-larzscript larzvault.lz}"
 LARZVAULT_SEED="${LARZVAULT_SEED:-larzscript tests/seed_balance.lz}"
 export LARZVAULT
 export LARZVAULT_SEED
+# Each test overrides $HOME to a fresh temp dir (so the game's own save
+# lives there, not the real ~/.larzvault) - but module resolution's
+# "~/.larzscript/lib" fallback would then ALSO re-resolve against that
+# fake HOME and stop finding the packages installed for the real user.
+# Pin LARZSCRIPT_PATH to the real, fixed install location now, before
+# any test gets a chance to override HOME.
+export LARZSCRIPT_PATH="${LARZSCRIPT_PATH:-$HOME/.larzscript/lib}"
 
 pass=0; fail=0
 for t in tests/*.sh; do
