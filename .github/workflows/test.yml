@@ -11,7 +11,7 @@ jobs:
       - name: install packages this project uses
         run: |
           mkdir -p ~/.larzscript/lib
-          for pkg in json fs crypto uuid table; do
+          for pkg in json fs crypto uuid random table; do
             curl -fsSL "https://raw.githubusercontent.com/larz-scripter/larzscript-packages/master/packages/$pkg/main.lz" -o ~/.larzscript/lib/"$pkg".lz
           done
       - name: run tests
